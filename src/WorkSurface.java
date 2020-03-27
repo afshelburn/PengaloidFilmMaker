@@ -1,11 +1,14 @@
+import java.awt.AlphaComposite;
 import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.Composite;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.GridLayout;
 import java.awt.Image;
-import java.awt.Insets;
+import java.awt.LayoutManager;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.awt.image.BufferedImage;
@@ -18,7 +21,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Properties;import java.util.Map;
@@ -29,10 +36,13 @@ import java.util.logging.Logger;
 import javax.imageio.ImageIO;
 import javax.swing.DefaultComboBoxModel;
 import javax.swing.DefaultListModel;
+import javax.swing.Icon;
 import javax.swing.DefaultListCellRenderer;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
+import javax.swing.JComponent;
 import javax.swing.JDesktopPane;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
@@ -42,14 +52,18 @@ import javax.swing.JList;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
+import javax.swing.JSlider;
+import javax.swing.JSplitPane;
 import javax.swing.JToolBar;
 import javax.swing.ListSelectionModel;
 import javax.swing.LookAndFeel;
+import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.UnsupportedLookAndFeelException;
 import javax.swing.event.ListSelectionEvent;
 import javax.swing.event.ListSelectionListener;
+import javax.swing.plaf.basic.BasicDesktopIconUI;
 import javax.swing.plaf.nimbus.NimbusLookAndFeel;
 
 public class WorkSurface {
@@ -59,9 +73,6 @@ public class WorkSurface {
 	JFrame mainFrame;
 	JDesktopPane desktop;
 	JToolBar toolbar;
-	
-	DefaultComboBoxModel<String> scenes;
-	DefaultComboBoxModel<String> stories;
 	
 	Map<String, SceneView> sceneViews;
 	Map<String, StoryView> storyViews;
@@ -73,14 +84,21 @@ public class WorkSurface {
 	//to do, add prompt on exit if modified
 	boolean unsaved = false;
 	
+	Map<Image, ImageIcon> thumbHash = new HashMap<Image, ImageIcon>();
+	
+
 	/**
 	 * Simple panel to display an image
 	 * @author antho
 	 *
 	 */
-	class ImagePanel extends JPanel {
+	class ImagePanel extends ProportionalPanel {
 
-		private Image image = null;
+		protected Image image = null;
+		
+		public ImagePanel() {
+			super(1920, 1080);
+		}
 		
 		public void setImage(Image img) {
 			ImagePanel.this.image = img;
@@ -109,9 +127,70 @@ public class WorkSurface {
 			float h = image.getHeight(null);
 			float w = image.getWidth(null);
 			float ratio = h/w;
-			g.drawImage(image, 0, 0, d.width, (int) (((float) d.width)*ratio), null);//, arg3, arg4, arg5, arg6, arg7, arg8, arg9)
+			g.drawImage(image, 0, 0, d.width, (int) (((float) d.width)*ratio), null);
 		}
 		
+	}
+	
+	/**
+	 * Overlays one or more secondary transparent images on an image panel
+	 * @author antho
+	 *
+	 */
+	class OnionPanel extends ImagePanel {
+		
+		private Vector<Image> onion = new Vector<Image>();
+		float alpha = 0.5f;
+		
+		public OnionPanel() {
+			
+		}
+		
+		public void setAlpha(float alpha) {
+			this.alpha = alpha;
+		}
+		
+		public void setOnionImage(Image image) {
+			this.onion.clear();
+			if(image != null) {
+				this.onion.add(image);
+			}
+		}
+		
+		public void setOnionImages(Collection<Image> images) {
+			this.onion.clear();
+			this.onion.addAll(images);
+		}
+		
+		@Override
+		protected void paintComponent(Graphics g) {
+			super.paintComponent(g);
+			
+			if(image != null) {
+				Dimension d = this.getSize();
+				float h = image.getHeight(null);
+				float w = image.getWidth(null);
+				float ratio = h/w;
+				g.drawImage(image, 0, 0, d.width, (int) (((float) d.width)*ratio), null);
+			}
+			
+			for(Image layer : onion) {
+
+				int rule = AlphaComposite.SRC_OVER;
+				Composite comp = AlphaComposite.getInstance(rule, alpha);
+				Graphics2D g2 = (Graphics2D) g;
+				g2.setComposite(comp);
+				
+				Dimension d = this.getSize();
+				float h = image.getHeight(null);
+				float w = image.getWidth(null);
+				float ratio = h/w;
+				
+				g2.drawImage(layer, 0, 0, d.width, (int) (((float) d.width)*ratio), null);
+				
+			}
+			
+		}
 	}
 	
 	/**
@@ -122,32 +201,83 @@ public class WorkSurface {
 	 */
 	class CameraView extends JInternalFrame {
 		
-		ImagePanel imagePanel;
+		OnionPanel imagePanel;
 		int port;
-		JComboBox sceneSelector;
+		JComboBox<String> sceneSelector;
+		JCheckBox onionCheck;
+		JSlider onionAlpha;
 		
 		public CameraView(int port) {
 			super("Camera: " + port, true, false, true, true);
-			this.sceneSelector = new JComboBox(scenes);
+			DefaultComboBoxModel<String> scenes = new DefaultComboBoxModel<String>();
+			for(String s : sceneViews.keySet()) {
+				scenes.addElement(s);
+			}
+			this.sceneSelector = new JComboBox<String>(scenes);
 			this.port = port;
-			this.imagePanel = new ImagePanel();
-			this.getContentPane().add("Center", imagePanel);
+			this.imagePanel = new OnionPanel();
 			JButton capture = new JButton("Capture");
 			capture.addActionListener(new ActionListener() {
 				@Override
 				public void actionPerformed(ActionEvent e) {
 					String scene = sceneSelector.getSelectedItem().toString();
 					int cursor = sceneViews.get(scene).getCursorPosition();
+					if(cursor >= 0)cursor += 1;
 					sceneViews.get(scene).addImage(cursor, imagePanel.cloneImage());
 				}
 			});
+			onionCheck = new JCheckBox("Enable Onion");
+			onionAlpha = new JSlider();
+			onionCheck.setSelected(false);
+			onionAlpha.setMinimum(0);
+			onionAlpha.setMaximum(100);
+			onionAlpha.setValue(50);
+			onionAlpha.setEnabled(false);
+			
+			onionCheck.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent e) {
+					onionAlpha.setEnabled(onionCheck.isSelected());
+					setOnion();
+				}
+			});
+			
 			JPanel control = new JPanel(new FlowLayout(FlowLayout.CENTER));
-			control.add(sceneSelector);
 			control.add(capture);
-			this.getContentPane().add("South", control);
+			control.add(sceneSelector);
+			control.add(onionCheck);
+			control.add(onionAlpha);
+			JSplitPane sp = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+			sp.setLeftComponent(imagePanel);
+			sp.setRightComponent(control);
+			sp.setResizeWeight(0.5);
+			imagePanel.setPreferredSize(new Dimension(480, 270));
+			imagePanel.setMinimumSize(new Dimension(480, 270));
+			this.getContentPane().add("Center", sp);
 			this.setSize(new Dimension(600, 400));
 			startMonitor();
 			setVisible(true);
+		}
+		
+		protected void setOnion() {
+			if(onionCheck.isSelected()) {
+				float alpha = ((float) onionAlpha.getValue()) / 100.0f;
+				imagePanel.setAlpha(alpha);
+				if(sceneSelector.getSelectedItem() != null) {
+					SceneView scene = sceneViews.get(sceneSelector.getSelectedItem());
+					if(scene != null) {
+						Image f = scene.frames.getSelectedValue();
+						if(f != null) {
+							imagePanel.setOnionImage(f);
+						}else {
+							imagePanel.setOnionImage(null);
+						}
+					}
+				}
+			}else {
+				imagePanel.setOnionImage(null);
+			}
+			imagePanel.repaint();
 		}
 		
 		public void startMonitor() {
@@ -188,6 +318,7 @@ public class WorkSurface {
 								@Override
 								public void run() {
 									imagePanel.setImage(image);
+									setOnion();
 								}
 							});
 						} catch (IOException e2) {
@@ -208,15 +339,13 @@ public class WorkSurface {
 	 *
 	 */
 	public class ImageRenderer extends DefaultListCellRenderer {
-		 
-		Map<Image, ImageIcon> thumbHash = new HashMap<Image, ImageIcon>();
 		
 		public ImageRenderer() {
 			super();
 		}
 		
 	    @Override
-	    public Component getListCellRendererComponent(JList list, Object object, int index,
+	    public Component getListCellRendererComponent(JList<?> list, Object object, int index,
 	        boolean isSelected, boolean cellHasFocus) {
 	        
 	    	if(object == null)return null;
@@ -277,7 +406,10 @@ public class WorkSurface {
 			currentFrame = new ImagePanel();
 			currentFrame.setPreferredSize(new Dimension(500,300));
 			listModel = new DefaultListModel<Image>();
-			
+			DefaultComboBoxModel<String> stories = new DefaultComboBoxModel<String>();
+			for(String s : storyViews.keySet()) {
+				stories.addElement(s);
+			}
 			storySelector = new JComboBox<String>(stories);
 			frames = new JList<Image>(listModel);
 			frames.setCellRenderer(new ImageRenderer());
@@ -357,6 +489,36 @@ public class WorkSurface {
 				}
 			});
 			
+			JButton copyScene = new JButton("Duplicate Scene");
+			copyScene.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent arg0) {
+					String sceneName = "Scene " + (sceneViews.size()+1);
+					SceneView sv = WorkSurface.this.addScene(sceneName);
+					Enumeration<Image> imgs = listModel.elements();
+					while(imgs.hasMoreElements()) {
+						sv.addImage(-1, imgs.nextElement());
+					}
+				}
+			});
+			
+			JButton reverseOrder = new JButton("Reverse Scene");
+			reverseOrder.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent arg0) {
+					ArrayList<Image> list = new ArrayList<Image>();
+					Enumeration<Image> imgs = listModel.elements();
+					while(imgs.hasMoreElements()) {
+						list.add(imgs.nextElement());
+					}
+					Collections.reverse(list);
+					listModel.removeAllElements();
+					for(Image img : list) {
+						SceneView.this.addImage(-1, img);
+					}
+				}
+			});
+			
 			//to do, make setting
 			int frameRate = 100;
 			JButton play = new JButton("Play");
@@ -406,8 +568,10 @@ public class WorkSurface {
 				}
 			});
 			JPanel capturePanel = new JPanel(new FlowLayout(FlowLayout.CENTER));
-			capturePanel.add(storySelector);
 			capturePanel.add(capture);
+			capturePanel.add(storySelector);
+			capturePanel.add(copyScene);
+			capturePanel.add(reverseOrder);
 			JPanel center = new JPanel(new BorderLayout());
 			center.add("Center", currentFrame);
 			center.add("South", capturePanel);
@@ -415,10 +579,16 @@ public class WorkSurface {
 			main.add("Center", center);
 			main.add("South", control);
 			main.add("North", currentFrameLabel);
-			SceneView.this.getContentPane().add("Center", main);
 			JScrollPane sp = new JScrollPane(frames);
+			
+			JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+			split.setLeftComponent(main);
+			split.setRightComponent(sp);
+			split.setResizeWeight(0.5);
+			currentFrame.setPreferredSize(new Dimension(480, 270));
+			currentFrame.setMinimumSize(new Dimension(480, 270));
 
-			SceneView.this.getContentPane().add("South", sp);
+			SceneView.this.getContentPane().add("Center", split);
 			
 			SceneView.this.setTitle(name);
 		}
@@ -436,9 +606,13 @@ public class WorkSurface {
 				}
 			}
 			sceneViews.remove(currentName);
-			int currentIndex = scenes.getIndexOf(currentName);
-			scenes.removeElement(currentName);
-			scenes.insertElementAt(newName, currentIndex);
+			
+			for(CameraView cv : cameraViews.values()) {
+				DefaultComboBoxModel<String> scenes = (DefaultComboBoxModel<String>) cv.sceneSelector.getModel();
+				int currentIndex = scenes.getIndexOf(currentName);
+				scenes.removeElement(currentName);
+				scenes.insertElementAt(newName, currentIndex);
+			}
 		}
 		
 		public int getCursorPosition() {
@@ -452,8 +626,7 @@ public class WorkSurface {
 			}
 			listModel.add(index, image);
 			currentFrame.setImage(image);
-			pack();
-			repaint();
+			frames.setSelectedValue(image, true);
 		}
 		
 		public void store(String key, Properties properties) {
@@ -620,7 +793,7 @@ public class WorkSurface {
 							for(int i = startIndex; i < listModel.getSize() + 1; i++) {
 								final int c = i == listModel.getSize() ? startIndex : i;
 								SwingUtilities.invokeLater(new Runnable() {
-									//@Override
+									@Override
 									public void run() {
 										sceneList.setSelectedIndex(c);
 									}
@@ -661,12 +834,44 @@ public class WorkSurface {
 			main.add("Center", currentFrame);
 			main.add("South", control);
 			main.add("North", currentFrameLabel);
-			StoryView.this.getContentPane().add("Center", main);
 			JScrollPane sp = new JScrollPane(sceneList);
+			
+			JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT);
+			split.setLeftComponent(main);
+			split.setRightComponent(sp);
+			split.setResizeWeight(0.5);
+			currentFrame.setPreferredSize(new Dimension(480, 270));
+			currentFrame.setMinimumSize(new Dimension(480, 270));
 
-			StoryView.this.getContentPane().add("South", sp);
+			StoryView.this.getContentPane().add("Center", split);
 			
 			StoryView.this.setTitle(storyName);
+			
+		}
+		
+		public int getFrameCount() {
+			int total = 0;
+			for(int i = 0; i < listModel.getSize(); i++) {
+				SceneView sv = sceneViews.get(listModel.getElementAt(i));
+				if(sv == null)continue;
+				total += sv.listModel.getSize();
+			}
+			return total;
+		}
+		
+		public Image getFrame(int index) {
+			int total = 0;
+			for(int i = 0; i < listModel.getSize(); i++) {
+				SceneView sv = sceneViews.get(listModel.getElementAt(i));
+				if(sv == null)continue;
+				total += sv.listModel.getSize();
+				if(index < total) {
+					total -= sv.listModel.getSize();
+					int f = index - total;
+					return sv.listModel.getElementAt(f);
+				}
+			}
+			return null;
 		}
 		
 		public void rename(String newName) {
@@ -675,9 +880,12 @@ public class WorkSurface {
 			StoryView.this.setTitle(newName);
 			storyViews.put(newName, this);
 			storyViews.remove(currentName);
-			int currentIndex = stories.getIndexOf(currentName);
-			stories.removeElement(currentName);
-			stories.insertElementAt(newName, currentIndex);
+			for(SceneView sv : sceneViews.values()) {
+				DefaultComboBoxModel<String> stories = (DefaultComboBoxModel<String>) sv.storySelector.getModel();
+				int currentIndex = stories.getIndexOf(currentName);
+				stories.removeElement(currentName);
+				stories.insertElementAt(newName, currentIndex);
+			}
 		}
 		
 		public int getCursorPosition() {
@@ -689,9 +897,6 @@ public class WorkSurface {
 				index = listModel.getSize();
 			}
 			listModel.add(index, scene);
-			//currentFrame.setImage(image);
-			pack();
-			repaint();
 		}
 
 		public void store(String key, Properties properties) {
@@ -712,6 +917,179 @@ public class WorkSurface {
 			}
 		}
 		
+	}
+	
+	/**
+	 * Creates a 2x2 set of images representing the first, 1/4, 3/4, and last images of the scene
+	 * @author antho
+	 *
+	 */
+	class SceneThumb implements Icon {
+		
+		SceneView scene;
+		
+		public SceneThumb(SceneView scene) {
+			this.scene = scene;
+		}
+		
+		@Override
+		public int getIconHeight() {
+			return 72*2+10;
+		}
+
+		@Override
+		public int getIconWidth() {
+			return (int) (128.0*2) + 10;
+		}
+
+		@Override
+		public void paintIcon(Component c, Graphics g, int x, int y) {
+			if(scene.listModel.isEmpty())return;
+			
+			Image[] images = new Image[4];
+			ImageIcon[] imageIcons = new ImageIcon[4];
+			
+			images[0] = scene.listModel.firstElement();
+			images[3] = scene.listModel.lastElement();
+			images[1] = scene.listModel.get(scene.listModel.getSize()/4);
+			images[2] = scene.listModel.get(scene.listModel.getSize()*3/4);
+			
+			for(int i = 0; i < 4; i++) {
+				Image img = images[i];
+	    		if(!thumbHash.containsKey(img)) {
+	    			float ratio = ((float) img.getWidth(null)) / ((float) img.getHeight(null));
+	    			Image imageClone = img.getScaledInstance(128, (int) (128.0f/ratio), Image.SCALE_SMOOTH);
+	    			imageIcons[i] = new ImageIcon(imageClone);
+	    			thumbHash.put(img, imageIcons[i]);
+	    		}else {
+	    			imageIcons[i] = thumbHash.get(img);
+	    		}
+			}
+    		
+    		g.drawImage(imageIcons[0].getImage(), x+5, y+5, null);
+    		g.drawImage(imageIcons[1].getImage(), x+128+5, y+5, null);
+    		g.drawImage(imageIcons[2].getImage(), x+5, y+5+imageIcons[0].getIconHeight(), null);
+    		g.drawImage(imageIcons[3].getImage(), x+128+5, y+5+imageIcons[0].getIconHeight(), null);
+    		
+    		g.drawRect(x, y, getIconWidth(), getIconHeight());
+    		
+		}
+		
+	}
+	
+	/**
+	 * Creates a 2x2 set of images representing the first, 1/4, 3/4, and last images of the story
+	 * @author antho
+	 *
+	 */
+	class StoryThumb implements Icon {
+		
+		StoryView story;
+		
+		public StoryThumb(StoryView story) {
+			this.story = story;
+		}
+		
+		@Override
+		public int getIconHeight() {
+			return 72*2+10;
+		}
+
+		@Override
+		public int getIconWidth() {
+			return (int) (128.0*2) + 10;
+		}
+
+		@Override
+		public void paintIcon(Component c, Graphics g, int x, int y) {
+			if(story.listModel.isEmpty())return;
+			
+			
+			Image[] images = new Image[4];
+			ImageIcon[] imageIcons = new ImageIcon[4];
+			
+			int frameCount = story.getFrameCount();
+			if(frameCount > 0) {
+			
+				images[0] = story.getFrame(0);
+				images[3] = story.getFrame(frameCount - 1);
+				images[1] = story.getFrame(frameCount/4);
+				images[2] = story.getFrame(frameCount*3/4);
+				
+				for(int i = 0; i < 4; i++) {
+					Image img = images[i];
+		    		if(!thumbHash.containsKey(img)) {
+		    			float ratio = ((float) img.getWidth(null)) / ((float) img.getHeight(null));
+		    			Image imageClone = img.getScaledInstance(128, (int) (128.0f/ratio), Image.SCALE_SMOOTH);
+		    			imageIcons[i] = new ImageIcon(imageClone);
+		    			thumbHash.put(img, imageIcons[i]);
+		    		}else {
+		    			imageIcons[i] = thumbHash.get(img);
+		    		}
+				}
+			}
+    		
+			if(imageIcons[0] != null)g.drawImage(imageIcons[0].getImage(), x+5, y+5, null);
+			if(imageIcons[0] != null)g.drawImage(imageIcons[1].getImage(), x+128+5, y+5, null);
+			if(imageIcons[0] != null)g.drawImage(imageIcons[2].getImage(), x+5, y+5+imageIcons[0].getIconHeight(), null);
+			if(imageIcons[0] != null)g.drawImage(imageIcons[3].getImage(), x+128+5, y+5+imageIcons[0].getIconHeight(), null);
+    		
+    		g.drawRect(x, y, getIconWidth(), getIconHeight());
+    		
+		}
+		
+	}
+	
+	/**
+	 * https://stackoverflow.com/questions/41223992/icons-similar-to-desktop-shortcuts-inside-jdesktoppane
+	 * @author antho
+	 *
+	 */
+	class SimpleDesktopIconUI extends BasicDesktopIconUI {
+		private final Icon icon;
+
+		SimpleDesktopIconUI(Icon icon) {
+			this.icon = icon;
+		}
+
+		@Override
+		protected void installComponents() {
+			frame = desktopIcon.getInternalFrame();
+			String title = frame.getTitle();
+
+			JLabel label = new JLabel(title, icon, SwingConstants.CENTER);
+			label.setVerticalTextPosition(JLabel.BOTTOM);
+			label.setHorizontalTextPosition(JLabel.CENTER);
+
+			desktopIcon.setBorder(null);
+			desktopIcon.setOpaque(false);
+			desktopIcon.setLayout(new GridLayout(1, 1));
+			desktopIcon.add(label);
+		}
+
+		@Override
+		protected void uninstallComponents() {
+			desktopIcon.setLayout(null);
+			desktopIcon.removeAll();
+			frame = null;
+		}
+
+		@Override
+		public Dimension getMinimumSize(JComponent c) {
+			LayoutManager layout = desktopIcon.getLayout();
+			Dimension size = layout.minimumLayoutSize(desktopIcon);
+			return new Dimension(size.width + 15, size.height + 15);
+		}
+
+		@Override
+		public Dimension getPreferredSize(JComponent c) {
+			return getMinimumSize(c);
+		}
+
+		@Override
+		public Dimension getMaximumSize(JComponent c) {
+			return getMinimumSize(c);
+		}
 	}
 	
 	/**
@@ -751,9 +1129,6 @@ public class WorkSurface {
 		
 		mainFrame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
 		
-		scenes = new DefaultComboBoxModel<String>();
-		stories = new DefaultComboBoxModel<String>();
-		
 		for(Integer i : cameraPorts) {
 			addCamera(i);
 		}
@@ -763,7 +1138,7 @@ public class WorkSurface {
 
 			@Override
 			public void actionPerformed(ActionEvent e) {
-				String sceneName = "Scene " + (scenes.getSize()+1);
+				String sceneName = "Scene " + (sceneViews.size()+1);
 				addScene(sceneName);
 			}
 			
@@ -774,7 +1149,7 @@ public class WorkSurface {
 
 			@Override
 			public void actionPerformed(ActionEvent e) {
-				String storyName = "Story " + (stories.getSize()+1);
+				String storyName = "Story " + (storyViews.size()+1);
 				addStory(storyName);
 			}
 			
@@ -873,7 +1248,7 @@ public class WorkSurface {
 
 			@Override
 			public void actionPerformed(ActionEvent e) {
-				JList<String> toDelete = new JList(scenes);
+				JList<String> toDelete = new JList<String>(new Vector<String>(sceneViews.keySet()));
 				toDelete.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
 				JScrollPane sp = new JScrollPane(toDelete);
 				JPanel panel = new JPanel(new BorderLayout());
@@ -895,7 +1270,7 @@ public class WorkSurface {
 
 			@Override
 			public void actionPerformed(ActionEvent e) {
-				JList<String> toDelete = new JList(stories);
+				JList<String> toDelete = new JList<String>(new Vector<String>(storyViews.keySet()));
 				toDelete.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
 				JScrollPane sp = new JScrollPane(toDelete);
 				JPanel panel = new JPanel(new BorderLayout());
@@ -912,6 +1287,16 @@ public class WorkSurface {
 			
 		});
 		
+		JButton tile = new JButton("Tile");
+		tile.addActionListener(new ActionListener() {
+
+			@Override
+			public void actionPerformed(ActionEvent e) {
+				tile(desktop);
+			}
+			
+		});
+		
 		toolbar.add(setWorkingFolder);
 		toolbar.add(openProject);
 		toolbar.add(save);
@@ -920,16 +1305,22 @@ public class WorkSurface {
 		toolbar.add(newStory);
 		toolbar.add(deleteScene);
 		toolbar.add(deleteStory);
+		toolbar.add(tile);
 		
 	}
 	
 	SceneView addScene(String sceneName) {
 		SceneView view = new SceneView(sceneName);
 		sceneViews.put(sceneName, view);
-		scenes.addElement(sceneName);
+		for(CameraView cv : cameraViews.values()) {
+			DefaultComboBoxModel<String> scenes = (DefaultComboBoxModel<String>) cv.sceneSelector.getModel();
+			scenes.addElement(sceneName);
+		}
 		view.setVisible(true);
 		view.setSize(new Dimension(300, 300));
 		desktop.add(view);
+		view.getDesktopIcon().setUI(new SimpleDesktopIconUI(new SceneThumb(view)));
+		view.pack();
 		return view;
 	}
 	
@@ -944,7 +1335,10 @@ public class WorkSurface {
 		if(view == null) {
 			logger.warning(sceneName + " does not exist");
 		}
-		scenes.removeElement(sceneName);
+		for(CameraView cv : cameraViews.values()) {
+			DefaultComboBoxModel<String> scenes = (DefaultComboBoxModel<String>) cv.sceneSelector.getModel();
+			scenes.removeElement(sceneName);
+		}
 		desktop.remove(view);
 		sceneViews.remove(sceneName);
 		view.dispose();
@@ -954,10 +1348,15 @@ public class WorkSurface {
 	StoryView addStory(String storyName) {
 		StoryView view = new StoryView(storyName);
 		storyViews.put(storyName, view);
-		stories.addElement(storyName);
+		for(SceneView sv : sceneViews.values()) {
+			DefaultComboBoxModel<String> stories = (DefaultComboBoxModel<String>) sv.storySelector.getModel();
+			stories.addElement(storyName);
+		}
 		view.setVisible(true);
 		view.setSize(new Dimension(300, 300));
 		desktop.add(view);
+		view.getDesktopIcon().setUI(new SimpleDesktopIconUI(new StoryThumb(view)));
+		view.pack();
 		return view;
 	}
 	
@@ -966,7 +1365,10 @@ public class WorkSurface {
 		if(view == null) {
 			logger.warning(storyName + " does not exist");
 		}
-		stories.removeElement(storyName);
+		for(SceneView sv : sceneViews.values()) {
+			DefaultComboBoxModel<String> stories = (DefaultComboBoxModel<String>) sv.storySelector.getModel();
+			stories.removeElement(storyName);
+		}
 		desktop.remove(view);
 		storyViews.remove(storyName);
 		view.dispose();
@@ -1094,6 +1496,7 @@ public class WorkSurface {
 					view.restore(s, properties);
 				}
 			}
+			tile(desktop);
 		} catch (FileNotFoundException e) {
 			logger.warning(e.getMessage());
 		} catch (IOException e) {
@@ -1104,6 +1507,110 @@ public class WorkSurface {
 	
 	public void showGUI() {
 		mainFrame.setVisible(true);
+		tile(desktop);
+	}
+	
+	/**
+	 * https://coderanch.com/t/549771/java/Aspect-ratio-Components
+	 * @author antho
+	 *
+	 */
+	class ProportionalPanel extends JPanel {
+
+		double proportion;
+
+		public ProportionalPanel(int x, int y) {
+			this((double) x / y);
+		}
+
+		public ProportionalPanel(double proportion) {
+			this.proportion = proportion;
+		}
+
+		@Override
+		public Dimension getPreferredSize() {
+			return new ProportionalDimension(super.getPreferredSize(), proportion);
+		}
+	}
+
+	class ProportionalDimension extends Dimension {
+
+		public ProportionalDimension(Dimension d, double proportion) {
+			double x = d.width;
+			double y = d.height;
+			if (x / y < proportion) {
+				width = (int) (y * proportion);
+				height = (int) y;
+			} else {
+				width = (int) x;
+				height = (int) (x / proportion);
+			}
+		}
+	}
+	
+	/**
+	 * From <a href=
+	 * "https://www.java-tips.org/how-to-tile-all-internal-frames-when-requested.html">java-tips.org</a>
+	 * <br>
+	 * Modified to account for iconified windows.
+	 * 
+	 * @param desk
+	 *            Desktop pane containing windows to be tiled.
+	 */
+	public static void tile(JDesktopPane desk) {
+		// How many frames do we have?
+		JInternalFrame[] frames = desk.getAllFrames();
+		List<JInternalFrame> tileableFrames = new ArrayList<>();
+		List<JInternalFrame> iconifiedFrames = new ArrayList<>();
+		boolean icons = false;
+		int count = 0;
+		for (JInternalFrame frame : frames) {
+			if (frame.isIcon()) {
+				iconifiedFrames.add(frame);
+				icons = true;
+			} else {
+				tileableFrames.add(frame);
+				count++;
+			}
+		}
+		if (count == 0)
+			return;
+
+		// Determine the necessary grid size
+		int sqrt = (int) Math.sqrt(count);
+		int rows = sqrt;
+		int cols = sqrt;
+		if (rows * cols < count) {
+			cols++;
+			if (rows * cols < count) {
+				rows++;
+			}
+		}
+
+		// Define some initial values for size & location.
+		Dimension size = desk.getSize();
+		int hb = size.height;
+		if (icons && hb > 27) {
+			hb -= 27;
+		}
+		int w = size.width / cols;
+		int h = hb / rows;
+
+		int x = 0;
+		int y = 0;
+
+		// Iterate over the frames and relocating & resizing each.
+		for (int i = 0; i < rows; i++) {
+			for (int j = 0; j < cols && ((i * cols) + j < count); j++) {
+				JInternalFrame f = tileableFrames.get((i * cols) + j);
+				desk.getDesktopManager().resizeFrame(f, x, y, w, h);
+				f.pack();
+				//desk.repaint();
+				x += w;
+			}
+			y += h; // start the next row
+			x = 0;
+		}
 	}
 	
 	/**
