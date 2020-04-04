@@ -109,8 +109,21 @@ public class WorkSurface {
 		public void deleteObserver(Observer o);
 	}
 
-	class Watchable<T extends Object> extends Observable {
+	class Watchable<T extends Object> extends Observable implements Cloneable {
 		T myObj;
+		Vector<Observer> observers = new Vector<Observer>();
+		@Override
+		public void notifyObservers(Object arg) {
+			for(Observer o : observers) {
+				o.update(this, arg);
+			}
+		}
+		@Override
+		public void notifyObservers() {
+			for(Observer o : observers) {
+				o.update(this, this.get());
+			}
+		}
 		public void set(T obj) {
 			if(obj != myObj) {
 				myObj = obj;
@@ -124,6 +137,20 @@ public class WorkSurface {
 		public void fireChange() {
 			setChanged();
 			notifyObservers(myObj);
+		}
+		@Override
+		public void addObserver(Observer o) {
+			if(!observers.contains(o))
+				observers.add(o);
+		}
+		@Override
+		public void deleteObserver(Observer o) {
+			observers.remove(o);
+		}
+		public Object clone() throws CloneNotSupportedException {
+			Watchable<T> clone = (Watchable<T>) super.clone();
+			clone.observers = new Vector<Observer>();
+			return clone;
 		}
 	}
 	
@@ -1343,25 +1370,12 @@ public class WorkSurface {
 	
 	class ImageEffect implements Observer, Cloneable {
 		
-		//Watchable<Image> input;
 		Watchable<Image> output = new Watchable<Image>();
 		String description = null;
 		
 		public ImageEffect(String description) {
 			this.description = description;
 		}
-		
-		/*
-		public void setInput(Watchable<Image> inputSource) {
-			if(input != null) {
-				input.deleteObserver(this);
-			}
-			input = inputSource;
-			if(input != null) {
-				input.addObserver(this);
-			}
-		}
-		*/
 
 		@Override
 		public void update(Observable arg0, Object arg1) {
@@ -1388,7 +1402,9 @@ public class WorkSurface {
 		}
 		
 		public ImageEffect clone() throws CloneNotSupportedException {
-			return (ImageEffect) super.clone();
+			ImageEffect cln = (ImageEffect) super.clone();
+			cln.output = (Watchable<Image>) this.output.clone();
+			return cln;
 		}
 		
 	}
@@ -1420,7 +1436,7 @@ public class WorkSurface {
 			for(int i = 0; i < out.getWidth(); i++) {
 				for(int j = 0; j < out.getHeight(); j++) {
 					Color c = new Color(out.getRGB(i, j));
-					out.setRGB(i, j, c.brighter().getRGB());
+					out.setRGB(i, j, c.darker().getRGB());
 				}
 			}
 			return out;
@@ -1600,7 +1616,7 @@ public class WorkSurface {
 		public void refreshStack() {
 			clearStack();
 			buildStack();
-			//original.watch.fireChange();
+			original.watch.fireChange();
 			repaint();
 		}
 		
@@ -1650,7 +1666,7 @@ public class WorkSurface {
 			sourceSelector.revalidate();
 			sceneSelector.revalidate();
 			
-			updateImage();
+			//updateImage();
 		}
 		
 		@Override
