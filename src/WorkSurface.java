@@ -1,5 +1,6 @@
 import java.awt.AlphaComposite;
 import java.awt.BorderLayout;
+import java.awt.Color;
 import java.awt.Component;
 import java.awt.Composite;
 import java.awt.Dimension;
@@ -9,8 +10,11 @@ import java.awt.Graphics2D;
 import java.awt.GridLayout;
 import java.awt.Image;
 import java.awt.LayoutManager;
+import java.awt.Point;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.FileInputStream;
@@ -27,8 +31,14 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
-import java.util.Properties;import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.Map;
+import java.util.Observable;
+import java.util.Observer;
 import java.util.TreeMap;
 import java.util.Vector;
 import java.util.logging.Logger;
@@ -41,6 +51,7 @@ import javax.swing.DefaultListCellRenderer;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JColorChooser;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JDesktopPane;
@@ -61,6 +72,8 @@ import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.UnsupportedLookAndFeelException;
+import javax.swing.event.ChangeEvent;
+import javax.swing.event.ChangeListener;
 import javax.swing.event.ListSelectionEvent;
 import javax.swing.event.ListSelectionListener;
 import javax.swing.plaf.basic.BasicDesktopIconUI;
@@ -79,6 +92,10 @@ public class WorkSurface {
 	
 	Map<Integer, CameraView> cameraViews;
 	
+	Map<String, Compositor> compositors;
+	
+	Map<String, ImageEffectPanel> effects;
+	
 	File workingFolder = null;
 	
 	//to do, add prompt on exit if modified
@@ -86,35 +103,56 @@ public class WorkSurface {
 	
 	Map<Image, ImageIcon> thumbHash = new HashMap<Image, ImageIcon>();
 	
+	interface ImageSource {
+		public Image getImage();
+		public void addObserver(Observer o);
+		public void deleteObserver(Observer o);
+	}
 
+	class Watchable<T extends Object> extends Observable {
+		T myObj;
+		public void set(T obj) {
+			if(obj != myObj) {
+				myObj = obj;
+				setChanged();
+				notifyObservers();
+			}
+		}
+		public T get() {
+			return myObj;
+		}
+	}
+	
 	/**
 	 * Simple panel to display an image
 	 * @author antho
 	 *
 	 */
-	class ImagePanel extends ProportionalPanel {
-
-		protected Image image = null;
+	class ImagePanel extends ProportionalPanel implements ImageSource {
+		
+		Watchable<Image> watch = new Watchable<Image>();
 		
 		public ImagePanel() {
 			super(1920, 1080);
 		}
 		
 		public void setImage(Image img) {
-			ImagePanel.this.image = img;
+			watch.set(img);
+			//ImagePanel.this.image = watch.get();
 			ImagePanel.this.repaint();
 		}
 		
 		public Image getImage() {
-			return this.image;
+			return watch.get();
 		}
 		
 		public Image cloneImage() {
-			if(image == null)return null;
+			if(watch.get() == null)return null;
+			Image img = watch.get();
 			BufferedImage copyOfImage = 
-					   new BufferedImage(image.getWidth(null), image.getHeight(null), BufferedImage.TYPE_INT_RGB);
+					   new BufferedImage(img.getWidth(null), img.getHeight(null), BufferedImage.TYPE_INT_RGB);
 					Graphics g = copyOfImage.createGraphics();
-					g.drawImage(image, 0, 0, null);
+					g.drawImage(img, 0, 0, null);
 					g.dispose();
 			return copyOfImage;
 		}
@@ -122,12 +160,23 @@ public class WorkSurface {
 		@Override
 		protected void paintComponent(Graphics g) {
 			super.paintComponent(g);
-			if(image == null)return;
+			Image img = watch.get();
+			if(img == null)return;
 			Dimension d = this.getSize();
-			float h = image.getHeight(null);
-			float w = image.getWidth(null);
+			float h = img.getHeight(null);
+			float w = img.getWidth(null);
 			float ratio = h/w;
-			g.drawImage(image, 0, 0, d.width, (int) (((float) d.width)*ratio), null);
+			g.drawImage(img, 0, 0, d.width, (int) (((float) d.width)*ratio), null);
+		}
+
+		@Override
+		public void addObserver(Observer o) {
+			watch.addObserver(o);
+		}
+
+		@Override
+		public void deleteObserver(Observer o) {
+			watch.deleteObserver(o);
 		}
 		
 	}
@@ -166,6 +215,7 @@ public class WorkSurface {
 		protected void paintComponent(Graphics g) {
 			super.paintComponent(g);
 			
+			Image image = getImage();
 			if(image != null) {
 				Dimension d = this.getSize();
 				float h = image.getHeight(null);
@@ -199,7 +249,7 @@ public class WorkSurface {
 	 * @author antho
 	 *
 	 */
-	class CameraView extends JInternalFrame {
+	class CameraView extends JInternalFrame implements Iterable<Image>, ImageSource {
 		
 		OnionPanel imagePanel;
 		int port;
@@ -209,6 +259,7 @@ public class WorkSurface {
 		
 		public CameraView(int port) {
 			super("Camera: " + port, true, false, true, true);
+			super.setName("Camera: " + port);
 			DefaultComboBoxModel<String> scenes = new DefaultComboBoxModel<String>();
 			for(String s : sceneViews.keySet()) {
 				scenes.addElement(s);
@@ -220,6 +271,7 @@ public class WorkSurface {
 			capture.addActionListener(new ActionListener() {
 				@Override
 				public void actionPerformed(ActionEvent e) {
+					if(sceneSelector.getSelectedItem() == null)return;
 					String scene = sceneSelector.getSelectedItem().toString();
 					int cursor = sceneViews.get(scene).getCursorPosition();
 					if(cursor >= 0)cursor += 1;
@@ -257,6 +309,10 @@ public class WorkSurface {
 			this.setSize(new Dimension(600, 400));
 			startMonitor();
 			setVisible(true);
+		}
+		
+		public String toString() {
+			return super.getName();
 		}
 		
 		protected void setOnion() {
@@ -331,6 +387,38 @@ public class WorkSurface {
 			new Thread(r).start();
 		}
 
+		@Override
+		public Iterator<Image> iterator() {
+			return new Iterator<Image>() {
+
+				@Override
+				public boolean hasNext() {
+					return true;
+				}
+
+				@Override
+				public Image next() {
+					return imagePanel.getImage();
+				}
+				
+			};
+		}
+
+		@Override
+		public Image getImage() {
+			return imagePanel.getImage();
+		}
+
+		@Override
+		public void addObserver(Observer o) {
+			imagePanel.addObserver(o);
+		}
+
+		@Override
+		public void deleteObserver(Observer o) {
+			imagePanel.deleteObserver(o);
+		}
+
 	}
 	
 	/**
@@ -391,7 +479,7 @@ public class WorkSurface {
 	 * @author antho
 	 *
 	 */
-	class SceneView extends JInternalFrame {
+	class SceneView extends JInternalFrame implements Iterable<Image>, ImageSource {
 		
 		ImagePanel currentFrame;
 		JLabel currentFrameLabel;
@@ -593,6 +681,10 @@ public class WorkSurface {
 			SceneView.this.setTitle(name);
 		}
 		
+		public String toString() {
+			return super.getName();
+		}
+		
 		public void rename(String newName) {
 			String currentName = super.getName();
 			SceneView.this.setName(newName);
@@ -670,6 +762,36 @@ public class WorkSurface {
 				}
 			}
 		}
+
+		@Override
+		public Iterator<Image> iterator() {
+			return new Iterator<Image>() {
+				int pos = 0;
+				@Override
+				public boolean hasNext() {
+					return pos < listModel.getSize() - 1;
+				}
+				@Override
+				public Image next() {
+					return listModel.get(pos++);
+				}
+			};
+		}
+
+		@Override
+		public Image getImage() {
+			return currentFrame.getImage();
+		}
+
+		@Override
+		public void addObserver(Observer o) {
+			currentFrame.addObserver(o);
+		}
+
+		@Override
+		public void deleteObserver(Observer o) {
+			currentFrame.deleteObserver(o);
+		}
 		
 	}
 	
@@ -678,7 +800,7 @@ public class WorkSurface {
 	 * @author antho
 	 *
 	 */
-	class StoryView extends JInternalFrame {
+	class StoryView extends JInternalFrame implements Iterable<Image>, ImageSource {
 		
 		ImagePanel currentFrame;
 		JLabel currentFrameLabel;
@@ -849,6 +971,10 @@ public class WorkSurface {
 			
 		}
 		
+		public String toString() {
+			return super.getName();
+		}
+		
 		public int getFrameCount() {
 			int total = 0;
 			for(int i = 0; i < listModel.getSize(); i++) {
@@ -915,6 +1041,427 @@ public class WorkSurface {
 					this.addScene(-1, scn);
 				}
 			}
+		}
+
+		@Override
+		public Iterator<Image> iterator() {
+			return new Iterator<Image>() {
+				int pos = 0;
+				@Override
+				public boolean hasNext() {
+					return pos < getFrameCount();
+				}
+				@Override
+				public Image next() {
+					return getFrame(pos++);
+				}
+			};
+		}
+
+		@Override
+		public Image getImage() {
+			return currentFrame.getImage();
+		}
+
+		@Override
+		public void addObserver(Observer o) {
+			currentFrame.addObserver(o);
+		}
+
+		@Override
+		public void deleteObserver(Observer o) {
+			currentFrame.deleteObserver(o);
+		}
+		
+	}
+	
+	class Compositor extends JInternalFrame implements ImageSource, Observer {
+		
+		OnionPanel onionPanel;
+		
+		ImagePanel foreground;
+		ImagePanel background;
+		ImagePanel greenScreen;
+		
+		JComboBox<ImageSource> foregroundSelector;
+		JComboBox<ImageSource> backgroundSelector;
+		JColorChooser colorPicker;
+		
+		DefaultComboBoxModel<ImageSource> foregroundSources;
+		DefaultComboBoxModel<ImageSource> backgroundSources;
+		
+		JComboBox<String> sceneSelector;
+		
+		
+		JButton colorButton;
+		
+		JSlider threshold;
+		
+		Color bgColor = Color.green;
+		
+		public Compositor(String name) {
+			super(name, true, false, true, true);
+			super.setName(name);
+			foregroundSources = new DefaultComboBoxModel<ImageSource>();
+			backgroundSources = new DefaultComboBoxModel<ImageSource>();
+			foregroundSelector = new JComboBox<ImageSource>(foregroundSources);
+			backgroundSelector = new JComboBox<ImageSource>(backgroundSources);
+			onionPanel = new OnionPanel();
+			foreground = new ImagePanel();
+			background = new ImagePanel();
+			greenScreen = new ImagePanel();
+			colorButton = new JButton("Pick Background Color");
+			colorButton.addActionListener(new ActionListener() {
+
+				@Override
+				public void actionPerformed(ActionEvent arg0) {
+					Color c = JColorChooser.showDialog((Component) arg0.getSource(), "Pick Background", bgColor);
+					if(c != null) {
+						setBGColor(c);
+						updateSelection();
+					}
+				}
+				
+			});
+			
+			DefaultComboBoxModel<String> scenes = new DefaultComboBoxModel<String>();
+			for(String s : sceneViews.keySet()) {
+				scenes.addElement(s);
+			}
+			sceneSelector = new JComboBox<String>(scenes);
+			
+			JButton capture = new JButton("Capture");
+			capture.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent e) {
+					if(sceneSelector.getSelectedItem() == null)return;
+					String scene = sceneSelector.getSelectedItem().toString();
+					int cursor = sceneViews.get(scene).getCursorPosition();
+					if(cursor >= 0)cursor += 1;
+					sceneViews.get(scene).addImage(cursor, onionPanel.cloneImage());
+				}
+			});
+			
+			threshold = new JSlider();
+			threshold.setMinimum(0);
+			threshold.setMaximum(255);
+			threshold.setValue(20);
+			threshold.addChangeListener(new ChangeListener() {
+
+				@Override
+				public void stateChanged(ChangeEvent arg0) {
+					Compositor.this.updateSelection();
+				}
+				
+			});
+			onionPanel.setPreferredSize(new Dimension(480, 270));
+			JPanel control = new JPanel(new FlowLayout(FlowLayout.CENTER));
+			control.add(foregroundSelector);
+			control.add(backgroundSelector);
+			control.add(colorButton);
+			control.add(threshold);
+			control.add(sceneSelector);
+			control.add(capture);
+			JPanel main = new JPanel(new BorderLayout());
+			main.add("South", control);
+			main.add("Center", onionPanel);
+			this.getContentPane().add("Center", main);
+			updateSources();
+			foregroundSelector.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent arg0) {
+					updateSelection();
+				}
+			});
+			backgroundSelector.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent arg0) {
+					updateSelection();
+				}
+			});
+			JPanel top = new JPanel(new FlowLayout(FlowLayout.CENTER));
+			top.add(foreground);
+			top.add(greenScreen);
+			top.add(background);
+			foreground.setPreferredSize(new Dimension(240*3/2, 135*3/2));
+			background.setPreferredSize(new Dimension(240*3/2, 135*3/2));
+			greenScreen.setPreferredSize(new Dimension(240*3/2, 135*3/2));
+			
+			foreground.addMouseListener(new MouseAdapter() {
+
+				@Override
+				public void mouseClicked(MouseEvent e) {
+					Point p = e.getPoint();
+					BufferedImage bi = (BufferedImage) foreground.getImage();
+					float fracX = ((float) p.getX()) / (float) foreground.getWidth();
+					float fracY = ((float) p.getY()) / (float) foreground.getHeight();
+					float x = fracX*((float) bi.getWidth());
+					float y = fracY*((float) bi.getHeight());
+					Color c = new Color(bi.getRGB((int) x, (int) y));
+					setBGColor(c);
+					updateSelection();
+				}
+				
+			});
+			main.add("North", top);
+			this.setTitle(name);
+		}
+		
+		public void setBGColor(Color c) {
+			this.bgColor = c;
+			colorButton.setBackground(this.bgColor);
+		}
+		
+		public String toString() {
+			return super.getName();
+		}
+		
+		public void updateSources() {
+			
+			for(int i = 0; i < foregroundSources.getSize(); i++) {
+				ImageSource imgSrc = foregroundSources.getElementAt(i);
+				imgSrc.deleteObserver(this);
+			}
+			
+			for(int i = 0; i < backgroundSources.getSize(); i++) {
+				ImageSource imgSrc = backgroundSources.getElementAt(i);
+				imgSrc.deleteObserver(this);
+			}
+			
+			foregroundSources.removeAllElements();
+			backgroundSources.removeAllElements();
+			DefaultComboBoxModel<String> scenes = (DefaultComboBoxModel<String>) sceneSelector.getModel();
+			scenes.removeAllElements();
+			for(SceneView sv : sceneViews.values()) {
+				foregroundSources.addElement(sv);
+				backgroundSources.addElement(sv);
+				scenes.addElement(sv.getName());
+			}
+			for(StoryView sv : storyViews.values()) {
+				foregroundSources.addElement(sv);
+				backgroundSources.addElement(sv);
+			}
+			for(CameraView cv : cameraViews.values()) {
+				foregroundSources.addElement(cv);
+				backgroundSources.addElement(cv);
+			}
+			for(Compositor cv : compositors.values()) {
+				if(cv != this) {
+					foregroundSources.addElement(cv);
+					backgroundSources.addElement(cv);
+				}
+			}
+			for(ImageEffectPanel cv : effects.values()) {
+				foregroundSources.addElement(cv);
+				backgroundSources.addElement(cv);
+			}
+			
+			for(int i = 0; i < foregroundSources.getSize(); i++) {
+				ImageSource imgSrc = foregroundSources.getElementAt(i);
+				imgSrc.addObserver(this);
+			}
+			
+			for(int i = 0; i < backgroundSources.getSize(); i++) {
+				ImageSource imgSrc = backgroundSources.getElementAt(i);
+				imgSrc.addObserver(this);
+			}
+			
+			foregroundSelector.revalidate();
+			backgroundSelector.revalidate();
+			sceneSelector.revalidate();
+		}
+		
+		public void updateSelection() {
+			ImageSource fg = (ImageSource) foregroundSelector.getSelectedItem();
+			if(fg != null) {
+				foreground.setImage(fg.getImage());
+				Image clnImg = cloneImage(fg.getImage());
+				if(clnImg != null) {
+					BufferedImage blank = new BufferedImage(clnImg.getWidth(null), clnImg.getHeight(null), BufferedImage.TYPE_INT_RGB);
+					for(int i = 0; i < blank.getWidth(); i++) {
+						for(int j = 0; j < blank.getHeight(); j++) {
+							blank.setRGB(i, j, Color.green.getRGB());
+						}
+					}
+					Image maskedImage = null;
+					try {
+						maskedImage = WorkSurface.this.replaceBackground(fg.getImage(), blank, bgColor, threshold.getValue());
+					} catch (Exception e) {
+						logger.warning(e.getMessage());
+					}
+					if(maskedImage != null) {
+						//foreground.setImage(maskedImage);
+						greenScreen.setImage(maskedImage);
+					}
+				}
+			}
+			ImageSource bg = (ImageSource) backgroundSelector.getSelectedItem();
+			if(bg != null) {
+				background.setImage(bg.getImage());
+				Image combinedImage = null;
+				try {
+					combinedImage = WorkSurface.this.replaceBackground(fg.getImage(), (BufferedImage) bg.getImage(), bgColor, threshold.getValue());
+				} catch (Exception e) {
+					logger.warning(e.getMessage());
+				}
+				onionPanel.setImage(combinedImage);
+			}
+		}
+
+		@Override
+		public Image getImage() {
+			return onionPanel.getImage();
+		}
+
+		@Override
+		public void addObserver(Observer o) {
+			onionPanel.addObserver(o);
+		}
+
+		@Override
+		public void deleteObserver(Observer o) {
+			onionPanel.deleteObserver(o);
+		}
+
+		@Override
+		public void update(Observable arg0, Object arg1) {
+			this.updateSelection();
+		}
+		
+	}
+	
+	class ImageEffectPanel extends JInternalFrame implements ImageSource, Observer {
+
+		ImagePanel original;
+		
+		ImagePanel effect;
+		
+		JComboBox<ImageSource> sourceSelector;
+		DefaultComboBoxModel<ImageSource> sources;
+		JComboBox<String> sceneSelector;
+		
+		public ImageEffectPanel(String name) {
+			super(name, true, false, true, true);
+			super.setName(name);
+			
+			original = new ImagePanel();
+			effect = new ImagePanel();
+			
+			original.setPreferredSize(new Dimension(480, 270));
+			original.setMinimumSize(new Dimension(240, 135));
+			
+			effect.setPreferredSize(new Dimension(480, 270));
+			effect.setMinimumSize(new Dimension(240, 135));
+			
+			sources = new DefaultComboBoxModel<ImageSource>();
+			sourceSelector = new JComboBox<ImageSource>(sources);
+			
+			sceneSelector = new JComboBox<String>(new DefaultComboBoxModel<String>());
+			
+			JButton captureButton = new JButton("Capture");
+			captureButton.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent arg0) {
+					if(sceneSelector.getSelectedItem() == null)return;
+					String scene = sceneSelector.getSelectedItem().toString();
+					int cursor = sceneViews.get(scene).getCursorPosition();
+					if(cursor >= 0)cursor += 1;
+					sceneViews.get(scene).addImage(cursor, effect.cloneImage());
+				}
+			});
+			JPanel control = new JPanel(new FlowLayout(FlowLayout.CENTER));
+			control.add(sourceSelector);
+			control.add(captureButton);
+			control.add(sceneSelector);
+			JPanel main = new JPanel(new BorderLayout());
+			JPanel center = new JPanel(new FlowLayout(FlowLayout.CENTER));
+			center.add(original);
+			center.add(effect);
+			main.add("Center", center);
+			main.add("South", control);
+			this.getContentPane().add("Center", main);
+			updateSources();
+			updateImage();
+		}
+		
+		public void updateSources() {
+			
+			ImageSource sel = (ImageSource) sourceSelector.getSelectedItem();
+			
+			for(int i = 0; i < sources.getSize(); i++) {
+				ImageSource imgSrc = sources.getElementAt(i);
+				imgSrc.deleteObserver(this);
+			}
+			
+			sources.removeAllElements();
+			
+			DefaultComboBoxModel<String> scenes = (DefaultComboBoxModel<String>) sceneSelector.getModel();
+			scenes.removeAllElements();
+			for(SceneView sv : sceneViews.values()) {
+				sources.addElement(sv);
+				scenes.addElement(sv.getName());
+			}
+			for(StoryView sv : storyViews.values()) {
+				sources.addElement(sv);
+			}
+			for(CameraView cv : cameraViews.values()) {
+				sources.addElement(cv);
+			}
+			for(Compositor cv : compositors.values()) {
+				sources.addElement(cv);
+			}
+			for(ImageEffectPanel cv : effects.values()) {
+				if(cv != this) {
+					sources.addElement(cv);
+				}
+			}
+			
+			for(int i = 0; i < sources.getSize(); i++) {
+				ImageSource imgSrc = sources.getElementAt(i);
+				imgSrc.addObserver(this);
+			}
+			
+			if(sel != null) {
+				if(sources.getIndexOf(sel) > -1) {
+					sourceSelector.setSelectedItem(sel);
+				}
+			}
+			
+			sourceSelector.revalidate();
+			sceneSelector.revalidate();
+			
+			updateImage();
+		}
+		
+		@Override
+		public void update(Observable arg0, Object arg1) {
+			updateSources();
+		}
+		
+		public void updateImage() {
+			ImageSource fg = (ImageSource) sourceSelector.getSelectedItem();
+			if(fg != null) {
+				original.setImage(fg.getImage());
+				Image clnImg = cloneImage(fg.getImage());
+				if(clnImg != null) {
+					effect.setImage(clnImg);
+				}
+			}
+		}
+
+		@Override
+		public Image getImage() {
+			return effect.getImage();
+		}
+
+		@Override
+		public void addObserver(Observer o) {
+			effect.watch.addObserver(o);
+		}
+
+		@Override
+		public void deleteObserver(Observer o) {
+			effect.watch.deleteObserver(o);
 		}
 		
 	}
@@ -1121,6 +1668,8 @@ public class WorkSurface {
 		sceneViews = new TreeMap<String, SceneView>();
 		storyViews = new TreeMap<String, StoryView>();
 		cameraViews = new TreeMap<Integer, CameraView>();
+		compositors = new TreeMap<String, Compositor>();
+		effects = new TreeMap<String, ImageEffectPanel>();
 		
 		desktop = new JDesktopPane();
 		toolbar = new JToolBar();
@@ -1287,6 +1836,28 @@ public class WorkSurface {
 			
 		});
 		
+		JButton addCompositor = new JButton("Add Compositor");
+		addCompositor.addActionListener(new ActionListener() {
+
+			@Override
+			public void actionPerformed(ActionEvent e) {
+				String name = "Compositor " + compositors.size();
+				addCompositor(name);
+			}
+			
+		});
+		
+		JButton addEffect = new JButton("Add Effect");
+		addEffect.addActionListener(new ActionListener() {
+
+			@Override
+			public void actionPerformed(ActionEvent e) {
+				String name = "Effect " + effects.size();
+				addEffect(name);
+			}
+			
+		});
+		
 		JButton tile = new JButton("Tile");
 		tile.addActionListener(new ActionListener() {
 
@@ -1305,6 +1876,8 @@ public class WorkSurface {
 		toolbar.add(newStory);
 		toolbar.add(deleteScene);
 		toolbar.add(deleteStory);
+		toolbar.add(addCompositor);
+		toolbar.add(addEffect);
 		toolbar.add(tile);
 		
 	}
@@ -1315,6 +1888,9 @@ public class WorkSurface {
 		for(CameraView cv : cameraViews.values()) {
 			DefaultComboBoxModel<String> scenes = (DefaultComboBoxModel<String>) cv.sceneSelector.getModel();
 			scenes.addElement(sceneName);
+		}
+		for(Compositor cv : compositors.values()) {
+			cv.updateSources();
 		}
 		view.setVisible(true);
 		view.setSize(new Dimension(300, 300));
@@ -1373,6 +1949,36 @@ public class WorkSurface {
 		storyViews.remove(storyName);
 		view.dispose();
 		desktop.repaint();
+	}
+	
+	void addCompositor(String name) {
+		Compositor view = compositors.get(name);
+		if(view != null) {
+			logger.warning(name + " already exists");
+			return;
+		}
+		view = new Compositor(name);
+		view.setVisible(true);
+		view.setSize(new Dimension(300, 300));
+		desktop.add(view);
+		//view.getDesktopIcon().setUI(new SimpleDesktopIconUI(new StoryThumb(view)));
+		view.pack();
+		compositors.put(name, view);
+	}
+	
+	void addEffect(String name) {
+		ImageEffectPanel view = effects.get(name);
+		if(view != null) {
+			logger.warning(name + " already exists");
+			return;
+		}
+		view = new ImageEffectPanel(name);
+		view.setVisible(true);
+		view.setSize(new Dimension(300, 300));
+		desktop.add(view);
+		//view.getDesktopIcon().setUI(new SimpleDesktopIconUI(new StoryThumb(view)));
+		view.pack();
+		effects.put(name, view);
 	}
 	
 	/**
@@ -1611,6 +2217,43 @@ public class WorkSurface {
 			y += h; // start the next row
 			x = 0;
 		}
+	}
+	
+	public Image cloneImage(Image image) {
+		if(image == null)return null;
+		BufferedImage copyOfImage = 
+				   new BufferedImage(image.getWidth(null), image.getHeight(null), BufferedImage.TYPE_INT_RGB);
+				Graphics g = copyOfImage.createGraphics();
+				g.drawImage(image, 0, 0, null);
+				g.dispose();
+		return copyOfImage;
+	}
+	
+	public Image replaceBackground(Image image, BufferedImage scenery, Color bg, int thresh) throws Exception {
+		BufferedImage result = (BufferedImage) cloneImage(image);
+		
+		if(result == null)return null;
+		
+		int w = result.getWidth();
+		int h = result.getHeight();
+		
+		int sw = scenery.getWidth(null);
+		int sh = scenery.getHeight(null);
+		
+		for(int i = 0; i < w; i++) {
+			for(int j = 0; j < h; j++) {
+				Color c = new Color(result.getRGB(i, j));
+				if(Math.abs(c.getRed()-bg.getRed()) > thresh)continue;
+				if(Math.abs(c.getGreen()-bg.getGreen()) > thresh)continue;
+				if(Math.abs(c.getBlue()-bg.getBlue()) > thresh)continue;
+				//must be background
+				if(i < sw && j < sh) {
+					result.setRGB(i, j, scenery.getRGB(i, j));
+				}
+			}
+		}
+		
+		return result;
 	}
 	
 	/**
