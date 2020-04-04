@@ -115,11 +115,15 @@ public class WorkSurface {
 			if(obj != myObj) {
 				myObj = obj;
 				setChanged();
-				notifyObservers();
+				notifyObservers(myObj);
 			}
 		}
 		public T get() {
 			return myObj;
+		}
+		public void fireChange() {
+			setChanged();
+			notifyObservers(myObj);
 		}
 	}
 	
@@ -128,7 +132,7 @@ public class WorkSurface {
 	 * @author antho
 	 *
 	 */
-	class ImagePanel extends ProportionalPanel implements ImageSource {
+	class ImagePanel extends ProportionalPanel implements ImageSource, Observer {
 		
 		Watchable<Image> watch = new Watchable<Image>();
 		
@@ -177,6 +181,13 @@ public class WorkSurface {
 		@Override
 		public void deleteObserver(Observer o) {
 			watch.deleteObserver(o);
+		}
+
+		@Override
+		public void update(Observable arg0, Object arg1) {
+			if(arg1 != null && arg1 instanceof Image) {
+				watch.set((Image) arg1);
+			}
 		}
 		
 	}
@@ -1330,6 +1341,92 @@ public class WorkSurface {
 		
 	}
 	
+	class ImageEffect implements Observer, Cloneable {
+		
+		//Watchable<Image> input;
+		Watchable<Image> output = new Watchable<Image>();
+		String description = null;
+		
+		public ImageEffect(String description) {
+			this.description = description;
+		}
+		
+		/*
+		public void setInput(Watchable<Image> inputSource) {
+			if(input != null) {
+				input.deleteObserver(this);
+			}
+			input = inputSource;
+			if(input != null) {
+				input.addObserver(this);
+			}
+		}
+		*/
+
+		@Override
+		public void update(Observable arg0, Object arg1) {
+			Image outputImage = this.process((Image) arg1);
+			output.set(outputImage);
+		}
+		
+		BufferedImage process(Image input) {
+			BufferedImage out = (BufferedImage) WorkSurface.this.cloneImage(input);
+			
+			return out;
+		}
+		
+		public void addObserver(Observer o) {
+			output.addObserver(o);
+		}
+		
+		public void deleteObserver(Observer o) {
+			output.deleteObserver(o);
+		}
+		
+		public String toString() {
+			return description;
+		}
+		
+		public ImageEffect clone() throws CloneNotSupportedException {
+			return (ImageEffect) super.clone();
+		}
+		
+	}
+	
+	class MakeBrighter extends ImageEffect {
+		public MakeBrighter() {
+			super("Make Brighter");
+		}
+		
+		BufferedImage process(Image input) {
+			BufferedImage out = super.process(input);
+			for(int i = 0; i < out.getWidth(); i++) {
+				for(int j = 0; j < out.getHeight(); j++) {
+					Color c = new Color(out.getRGB(i, j));
+					out.setRGB(i, j, c.brighter().getRGB());
+				}
+			}
+			return out;
+		}
+	}
+	
+	class MakeDarker extends ImageEffect {
+		public MakeDarker() {
+			super("Make Darker");
+		}
+		
+		BufferedImage process(Image input) {
+			BufferedImage out = super.process(input);
+			for(int i = 0; i < out.getWidth(); i++) {
+				for(int j = 0; j < out.getHeight(); j++) {
+					Color c = new Color(out.getRGB(i, j));
+					out.setRGB(i, j, c.brighter().getRGB());
+				}
+			}
+			return out;
+		}
+	}
+	
 	class ImageEffectPanel extends JInternalFrame implements ImageSource, Observer {
 
 		ImagePanel original;
@@ -1340,12 +1437,25 @@ public class WorkSurface {
 		DefaultComboBoxModel<ImageSource> sources;
 		JComboBox<String> sceneSelector;
 		
+		JList<ImageEffect> effectList;
+		DefaultListModel<ImageEffect> effectListModel;
+		
+		DefaultComboBoxModel<ImageEffect> effectModel = new DefaultComboBoxModel<ImageEffect>();
+		JComboBox<ImageEffect> effectSelector;
+		
 		public ImageEffectPanel(String name) {
 			super(name, true, false, true, true);
 			super.setName(name);
 			
+			effectSelector = new JComboBox<ImageEffect>(effectModel);
+			effectModel.addElement(new MakeBrighter());
+			effectModel.addElement(new MakeDarker());
+			
 			original = new ImagePanel();
 			effect = new ImagePanel();
+			
+			effectList = new JList<ImageEffect>(effectListModel = new DefaultListModel<ImageEffect>());
+			effectList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
 			
 			original.setPreferredSize(new Dimension(480, 270));
 			original.setMinimumSize(new Dimension(240, 135));
@@ -1369,19 +1479,129 @@ public class WorkSurface {
 					sceneViews.get(scene).addImage(cursor, effect.cloneImage());
 				}
 			});
+			JButton addEffect = new JButton("Add Effect");
+			addEffect.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent arg0) {
+					ImageEffect e = (ImageEffect) effectSelector.getSelectedItem();
+					if(e != null) {
+						int cursor = effectList.getSelectedIndex();
+						if(cursor < 0)cursor = 0;
+						DefaultListModel<ImageEffect> lm = (DefaultListModel<ImageEffect>) effectList.getModel();
+						try {
+							ImageEffect cln = e.clone();
+							lm.add(cursor, cln);
+						} catch (CloneNotSupportedException e1) {
+							logger.warning(e1.getMessage());
+						}
+					}
+					refreshStack();
+				}
+			});
+			
+			JButton moveLeft = new JButton("<<--");
+			moveLeft.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent ae) {
+					if(effectList.getSelectedIndex() <= 0)return;
+					int sel = effectList.getSelectedIndex();
+					//remove the item to the left
+					ImageEffect removed = effectListModel.remove(sel-1);
+					effectListModel.add(sel, removed);
+					refreshStack();
+				}
+			});
+			
+			JButton moveRight = new JButton("-->>");
+			moveRight.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent ae) {
+					if(effectList.getSelectedIndex() >= effectListModel.size()-1)return;
+					if(effectList.getSelectedIndex() < 0)return;
+					int sel = effectList.getSelectedIndex();
+					//remove the item to the right
+					ImageEffect removed = effectListModel.remove(sel+1);
+					effectListModel.add(sel, removed);
+					refreshStack();
+				}
+			});
+			
+			JButton delete = new JButton("Delete");
+			delete.addActionListener(new ActionListener() {
+				@Override
+				public void actionPerformed(ActionEvent ae) {
+					if(effectList.getSelectedIndex() >= effectListModel.size())return;
+					if(effectList.getSelectedIndex() < 0)return;
+					int sel = effectList.getSelectedIndex();
+					effectListModel.remove(sel);
+					refreshStack();
+				}
+			});
+			
 			JPanel control = new JPanel(new FlowLayout(FlowLayout.CENTER));
 			control.add(sourceSelector);
+			control.add(effectSelector);
+			control.add(addEffect);
+			control.add(moveLeft);
+			control.add(moveRight);
+			control.add(delete);
 			control.add(captureButton);
 			control.add(sceneSelector);
 			JPanel main = new JPanel(new BorderLayout());
 			JPanel center = new JPanel(new FlowLayout(FlowLayout.CENTER));
+			
 			center.add(original);
 			center.add(effect);
 			main.add("Center", center);
 			main.add("South", control);
-			this.getContentPane().add("Center", main);
+			
+			JSplitPane split = new JSplitPane();
+			split.setOrientation(JSplitPane.VERTICAL_SPLIT);
+			split.setLeftComponent(main);
+			split.setBottomComponent(new JScrollPane(effectList));
+			this.getContentPane().add("Center", split);
+			//this.getContentPane().add("South", new JScrollPane(effectList));
+			effectList.setLayoutOrientation(JList.HORIZONTAL_WRAP);
 			updateSources();
 			updateImage();
+			pack();
+		}
+		
+		void clearStack() {
+			ImageEffect first = effectListModel.firstElement();
+			ImageEffect last = effectListModel.lastElement();
+			if(first != null) {
+				original.deleteObserver(first);
+			}
+			if(last != null) {
+				last.deleteObserver(effect);
+			}
+			for(int i = 0; i < effectListModel.getSize()-1; i++) {
+				ImageEffect e = effectListModel.get(i);
+				e.deleteObserver(effectListModel.get(i+1));
+			}
+		}
+		
+		void buildStack() {
+			ImageEffect first = effectListModel.firstElement();
+			ImageEffect last = effectListModel.lastElement();
+			if(first != null) {
+				original.addObserver(first);
+			}
+			if(last != null) {
+				last.addObserver(effect);
+			}
+			for(int i = 0; i < effectListModel.getSize()-1; i++) {
+				ImageEffect e = effectListModel.get(i);
+				e.addObserver(effectListModel.get(i+1));
+			}
+		}
+		
+		public void refreshStack() {
+			clearStack();
+			buildStack();
+			//original.watch.fireChange();
+			repaint();
 		}
 		
 		public void updateSources() {
@@ -1442,10 +1662,10 @@ public class WorkSurface {
 			ImageSource fg = (ImageSource) sourceSelector.getSelectedItem();
 			if(fg != null) {
 				original.setImage(fg.getImage());
-				Image clnImg = cloneImage(fg.getImage());
-				if(clnImg != null) {
-					effect.setImage(clnImg);
-				}
+				//Image clnImg = cloneImage(fg.getImage());
+				//if(clnImg != null) {
+				//	effect.setImage(clnImg);
+				//}
 			}
 		}
 
